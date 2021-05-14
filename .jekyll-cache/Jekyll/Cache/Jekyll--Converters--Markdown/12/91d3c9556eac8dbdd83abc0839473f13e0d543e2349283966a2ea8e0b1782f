@@ -1,0 +1,661 @@
+I"F�<h1 id="assignment-4-search-your-transcripts-you-will-know-it-to-be-true-part-2">Assignment 4: “Search your transcripts. You will know it to be true.” (Part 2)</h1>
+
+<h2 id="-cristian-danescu-niculescu-mizil-2021">© Cristian Danescu-Niculescu-Mizil 2021</h2>
+
+<h2 id="csinfo-4300-language-and-information">CS/INFO 4300 Language and Information</h2>
+
+<p><strong>Learning Objectives</strong></p>
+
+<ul>
+  <li>Develop an understanding of the inverted index and its applications</li>
+  <li>Explore use cases of boolean search</li>
+  <li>Examine how the inverted index can be used to efficiently compute IDF values</li>
+  <li>Introduce cosine similarity as an efficient search model</li>
+</ul>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">defaultdict</span>
+<span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">Counter</span>
+<span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">math</span>
+<span class="kn">import</span> <span class="nn">string</span>
+<span class="kn">import</span> <span class="nn">time</span>
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="n">np</span>
+<span class="kn">from</span> <span class="nn">nltk.tokenize</span> <span class="kn">import</span> <span class="n">TreebankWordTokenizer</span>
+<span class="kn">from</span> <span class="nn">IPython.core.display</span> <span class="kn">import</span> <span class="n">HTML</span>
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s">"kardashian-transcripts.json"</span><span class="p">,</span> <span class="s">"r"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">transcripts</span> <span class="o">=</span> <span class="n">json</span><span class="p">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">transcripts</span><span class="p">[</span><span class="mi">0</span><span class="p">]))</span>
+</code></pre></div></div>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>851
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">treebank_tokenizer</span> <span class="o">=</span> <span class="n">TreebankWordTokenizer</span><span class="p">()</span>
+<span class="n">flat_msgs</span> <span class="o">=</span> <span class="p">[</span><span class="n">m</span> <span class="k">for</span> <span class="n">transcript</span> <span class="ow">in</span> <span class="n">transcripts</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">transcript</span><span class="p">]</span>
+<span class="n">queries</span> <span class="o">=</span> <span class="p">[</span><span class="sa">u</span><span class="s">"Honey, shea  the  one that walked in  with  a $5,000 all-black basic dress."</span><span class="p">,</span>
+           <span class="sa">u</span><span class="s">"What is Kim doing?"</span><span class="p">,</span>
+           <span class="sa">u</span><span class="s">"Even at my advanced age, I got the hot wife, I got 2 great families."</span><span class="p">,</span>
+           <span class="sa">u</span><span class="s">"I need a drink."</span><span class="p">]</span>
+</code></pre></div></div>
+
+<h2 id="finding-the-most-similar-messages-cosine-similarity">Finding the most similar messages (cosine similarity)</h2>
+
+<h3 id="a-high-level-overview">A high-level overview</h3>
+
+<p>Our overall goal of the last part of this assignment is to build a system where we can compute the cosine similarity between queries and our datasets quickly. To accomplish queries and compute cosine similarities, we will need to represent documents as vectors. A common method of representing documents as vectors is by using “term frequency-inverse document frequency” (tf-idf) scores. More details about this method can be found <a href="https://canvas.cornell.edu/courses/27497/files?preview=3104608">on the course website</a>. The notation here is consistent with the hand out, so if you haven’t read over it – you should!</p>
+
+<p>Consider the tf-idf representation of a document and a query: $\vec{d_j}$ and $\vec{q}$, respectively. Elements of these vectors are very often zero because the term frequency of most words in most documents is zero. Stated differently, most words don’t appear in most documents! Consider a query that has 5 words in it and a vocabulary that has 20K words in it – only .025% of the elements of the vector representation of the query are nonzero! When a vector (or a matrix) has very few nonzero entries, it is called “sparse.” We can take advantage of the sparsity of tf-idf document representations to compute cosine similarity quickly. We will first build some data stuctures that allow for faster querying of statistics, and then we will build a function that quickly computes cosine similarity between queries and documents.</p>
+
+<h3 id="a-starting-point">A starting point</h3>
+<p>We will use an <strong>inverted index</strong> for efficiency. This is a sparse term-centered representation that allows us to quickly find all documents that contain a given term.</p>
+
+<h2 id="q1-write-a-function-to-construct-the-inverted-index-code-completion">Q1 Write a function to construct the inverted index (Code Completion)</h2>
+
+<p>As in class, the inverted index is a key-value structure where the keys are terms and the values are lists of <em>postings</em>. In this case, we record the documents a term occurs in as well as the <strong>count</strong> of that term in that document.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">build_inverted_index</span><span class="p">(</span><span class="n">msgs</span><span class="p">):</span>
+    <span class="s">""" Builds an inverted index from the messages.
+    
+    Arguments
+    =========
+    
+    msgs: list of dicts.
+        Each message in this list already has a 'toks'
+        field that contains the tokenized message.
+    
+    Returns
+    =======
+    
+    inverted_index: dict
+        For each term, the index contains 
+        a sorted list of tuples (doc_id, count_of_term_in_doc)
+        such that tuples with smaller doc_ids appear first:
+        inverted_index[term] = [(d1, tf1), (d2, tf2), ...]
+        
+    Example
+    =======
+    
+    &gt;&gt; test_idx = build_inverted_index([
+    ...    {'toks': ['to', 'be', 'or', 'not', 'to', 'be']},
+    ...    {'toks': ['do', 'be', 'do', 'be', 'do']}])
+    
+    &gt;&gt; test_idx['be']
+    [(0, 2), (1, 2)]
+    
+    &gt;&gt; test_idx['not']
+    [(0, 1)]
+    
+    Note that doc_id refers to the index of the document/message in msgs.
+    """</span>
+    <span class="c1"># YOUR CODE HERE
+</span>    <span class="n">n</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">msgs</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+        <span class="n">wc</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">msgs</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="s">'toks'</span><span class="p">]:</span>
+            <span class="n">wc</span><span class="p">[</span><span class="n">word</span><span class="p">]</span> <span class="o">=</span> <span class="n">wc</span><span class="p">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">word</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="mi">1</span>
+        <span class="k">for</span> <span class="n">word</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">wc</span><span class="p">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">result</span><span class="p">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">word</span><span class="p">,</span> <span class="p">[]).</span><span class="n">append</span><span class="p">((</span><span class="n">i</span><span class="p">,</span> <span class="n">count</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">result</span>
+                
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># This is an autograder test. Here we can test the function you just wrote above.
+</span><span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span>
+<span class="n">inv_idx</span> <span class="o">=</span> <span class="n">build_inverted_index</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">)</span>
+<span class="n">execution_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mi">10000</span> 
+<span class="k">assert</span> <span class="p">[</span><span class="n">i</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">inv_idx</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">]]</span> <span class="o">==</span> <span class="nb">sorted</span><span class="p">([</span><span class="n">i</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">inv_idx</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">]])</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">])</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">[</span><span class="s">'kim'</span><span class="p">])</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">])</span> <span class="o">&gt;=</span> <span class="mi">400</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">])</span> <span class="o">&lt;=</span> <span class="mi">435</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">[</span><span class="s">'baby'</span><span class="p">])</span> <span class="o">&gt;=</span> <span class="mi">250</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">[</span><span class="s">'baby'</span><span class="p">])</span> <span class="o">&lt;=</span> <span class="mi">300</span>
+<span class="k">assert</span> <span class="n">execution_time</span> <span class="o">&lt;=</span> <span class="mf">1.0</span>
+</code></pre></div></div>
+
+<h2 id="q2-using-the-inverted-index-for-boolean-search-code-completion">Q2 Using the inverted index for boolean search (Code Completion)</h2>
+
+<p>In this section we will use the inverted index you constructed to perform an efficient boolean search. The boolean model was one of the early information retrieval models, and continues to be used in applications today.</p>
+
+<p>A boolean search works by searching for documents which match the boolean expression of the query. Three main operators in a boolean search are <code class="language-plaintext highlighter-rouge">AND</code> <code class="language-plaintext highlighter-rouge">OR</code> and <code class="language-plaintext highlighter-rouge">NOT</code>. For example, the query <code class="language-plaintext highlighter-rouge">"Ned" and "Rob"</code> would return any document which contains both the words “Ned” and “Rob”.</p>
+
+<p>Here, we will treat a query as a simple two-word search with exclusion. For example, the query words “kardashian”, “kim” would be equivalent to the boolean expression <code class="language-plaintext highlighter-rouge">"kardashian" NOT "kim"</code>.</p>
+
+<h4 id="in-class-we-discussed-the-merge-postings-algorithm-you-can-review-the-algorithm-here-code-is-provided-here-under-posting-merging-algorithm-for-efficient-boolean-search">In class, we discussed the Merge Postings Algorithm. You can review the algorithm <a href="https://canvas.cornell.edu/courses/27497/files?preview=3125065">here</a>; code is provided <a href="https://canvas.cornell.edu/courses/27497/files?preview=3125064">here</a> under “Posting merging algorithm for efficient boolean search”.</h4>
+
+<p>The Merge Postings Algorithm we implemented can be thought of a boolean search with the <code class="language-plaintext highlighter-rouge">AND</code> operator. Write a function <code class="language-plaintext highlighter-rouge">boolean_search</code> that implements a similar algorithm with the <code class="language-plaintext highlighter-rouge">NOT</code> operator using the inverted index.</p>
+
+<p><strong>Note:</strong> Make sure you convert the <code class="language-plaintext highlighter-rouge">query_word</code> and <code class="language-plaintext highlighter-rouge">excluded_word</code> to lowercase.</p>
+
+<p><strong>Note:</strong> We highly recommend that you implement the merge postings algorithm for <code class="language-plaintext highlighter-rouge">boolean_search</code>. You don’t have to follow it exactly, but we may test whether your implementation is as efficient as the merge postings algorithm. We’d caution against trying a different implementation.</p>
+
+<h2 id="for-your-convenience-we-provide-below-the-algorithm-you-should-implement">For your convenience, we provide below the algorithm you should implement.</h2>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Initialize empty list (called merged list M)
+
+Create sorted list A of documents containing the query_word
+
+Create sorted list B of documents containing the excluded_word
+
+Start: Pointer at the first element of both A and B
+
+Do: Does it point to the same document ID in each list?
+
+    Yes: advance pointer in both A and B
+
+    No: 
+        If the pointer with the smaller document ID is in list A:
+            Append the smaller document ID to list M
+        
+        Advance (to the right) the pointer with the smaller ID
+
+End: When we attempt to advance a pointer already at the end of its list
+
+Finally: if there are remaining document IDs in list A that were not evaluated in the above loop, then append them to list M.
+</code></pre></div></div>
+
+<hr />
+
+<p><strong>Note:</strong> The objective is to demonstrate your knowledge in building an efficient search algorithm. If you use the Python <code class="language-plaintext highlighter-rouge">set.difference</code> function, you will lose points.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">boolean_search</span><span class="p">(</span><span class="n">query_word</span><span class="p">,</span><span class="n">excluded_word</span><span class="p">,</span> <span class="n">inverted_index</span><span class="p">):</span>
+    <span class="s">""" Search the collection of documents for the given query_word 
+        provided that the documents do not include the excluded_word
+    
+    Arguments
+    =========
+    
+    query_word: string,
+        The word we are searching for in our documents.
+    
+    excluded_word: string,
+        The word excluded from our documents.
+    
+    inverted_index: an inverted index as above
+    
+    
+    Returns
+    =======
+    
+    results: list of ints
+        Sorted List of results (in increasing order) such that every element is a `doc_id`
+        that points to a document that satisfies the boolean
+        expression of the query.
+        
+    """</span>
+    <span class="c1"># YOUR CODE HERE
+</span>    <span class="n">query_word</span> <span class="o">=</span> <span class="n">query_word</span><span class="p">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="n">excluded_word</span> <span class="o">=</span> <span class="n">excluded_word</span><span class="p">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="n">M</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">A</span><span class="p">,</span> <span class="n">B</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">doc_id</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">inverted_index</span><span class="p">[</span><span class="n">query_word</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="n">count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">A</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">doc_id</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">doc_id</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">inverted_index</span><span class="p">[</span><span class="n">excluded_word</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="n">count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">B</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">doc_id</span><span class="p">)</span>
+    <span class="n">i</span><span class="p">,</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span>
+    <span class="k">while</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">A</span><span class="p">)</span> <span class="ow">and</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">B</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">A</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">B</span><span class="p">[</span><span class="n">j</span><span class="p">]:</span> 
+            <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="n">j</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">A</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">B</span><span class="p">[</span><span class="n">j</span><span class="p">]:</span>
+                <span class="n">M</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">A</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+                <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">j</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="k">if</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="nb">len</span><span class="p">(</span><span class="n">A</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">A</span><span class="p">)):</span>
+            <span class="n">M</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">A</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">M</span>
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">result0_start_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span>
+<span class="n">result0</span> <span class="o">=</span> <span class="n">boolean_search</span><span class="p">(</span><span class="s">'ice'</span><span class="p">,</span><span class="s">'cream'</span><span class="p">,</span> <span class="n">inv_idx</span><span class="p">)</span>
+<span class="n">result0_execution_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">result0_start_time</span>
+<span class="n">result3</span> <span class="o">=</span> <span class="n">boolean_search</span><span class="p">(</span><span class="s">'puppy'</span><span class="p">,</span><span class="s">'dog'</span><span class="p">,</span> <span class="n">inv_idx</span><span class="p">)</span>
+<span class="n">result1</span><span class="o">=</span> <span class="n">boolean_search</span><span class="p">(</span><span class="s">'Kardashian'</span><span class="p">,</span><span class="s">'Kim'</span><span class="p">,</span><span class="n">inv_idx</span><span class="p">)</span>
+<span class="n">result4</span><span class="o">=</span> <span class="n">boolean_search</span><span class="p">(</span><span class="s">'cake'</span><span class="p">,</span><span class="s">'cake'</span><span class="p">,</span><span class="n">inv_idx</span><span class="p">)</span>
+<span class="n">result5</span><span class="o">=</span> <span class="n">boolean_search</span><span class="p">(</span><span class="s">'honey'</span><span class="p">,</span><span class="s">'money'</span><span class="p">,</span><span class="n">inv_idx</span><span class="p">)</span>
+<span class="k">assert</span> <span class="n">result0_execution_time</span> <span class="o">&lt;</span> <span class="mf">1.0</span>
+<span class="k">assert</span> <span class="nb">type</span><span class="p">(</span><span class="n">result1</span><span class="p">)</span> <span class="o">==</span> <span class="nb">list</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">result3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">7</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">result4</span><span class="p">)</span><span class="o">==</span><span class="mi">0</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">result5</span><span class="p">)</span><span class="o">==</span><span class="mi">237</span>
+</code></pre></div></div>
+
+<h2 id="q2b-using-the-inverted-index-for-boolean-search-free-response">Q2b Using the inverted index for boolean search (Free Response)</h2>
+
+<p>In A3 we already explored search techniques which are able to find a wider variety of relevant results. Why might you want to use a boolean search with an inverted index instead? Give a specific example in which a boolean search would be a better choice than a search with edit distance, and justify why a boolean search would be preferable.</p>
+
+<div style="border-bottom: 4px solid #AAA; padding-bottom: 6px; font-size: 16px; font-weight: bold;">Write your answer in the provided cell below</div>
+
+<p>For example, if we want Kardashian but not Kim, we may want some Kardashian family members other than Kim Kardashian. With edit distance, we don’t have a very good way other than search all members one by one (compute each edit distance of Khloe Kardashian, Kourtney Kardashian, etc.) But with boolean search this is very easy, by definition.</p>
+
+<div style="border-top: 4px solid #AAA; padding-bottom: 6px; font-size: 16px; font-weight: bold; text-align: center;"></div>
+
+<h2 id="q3-compute-idf-using-the-inverted-index-code-completion">Q3 Compute IDF <em>using</em> the inverted index (Code Completion)</h2>
+
+<p>Write a function <code class="language-plaintext highlighter-rouge">compute_idf</code> that uses the inverted index to efficiently compute IDF values.</p>
+
+<p>Words that occur in a very small number of documents are not useful in many cases, so we ignore them. Use a parameter <code class="language-plaintext highlighter-rouge">min_df</code>
+to ignore all terms that occur in strictly fewer than <code class="language-plaintext highlighter-rouge">min_df=15</code> documents.</p>
+
+<p>Similarly, words that occur in a large <em>fraction</em> of the documents don’t bring any more information for some tasks. Use a parameter <code class="language-plaintext highlighter-rouge">max_df_ratio</code> to trim out such words. For example, <code class="language-plaintext highlighter-rouge">max_df_ratio=0.90</code> means ignore all words that occur in more than 90% of the documents.</p>
+
+<p>As a reminder, we define the IDF statistic as…
+\(IDF(t) = \log \left(\frac{N}{1 + DF(t)} \right)\)</p>
+
+<p>where $N$ is the total number of docs and $DF(t)$ is the number of docs containing $t$. Keep in mind, there are other definitions of IDF out there, so if you go looking for resources on the internet, you might find differing (but also valid) accounts. In practice the base of the log doesn’t really matter, however you should use base 2 here.</p>
+
+<p><strong>Note:</strong> If words are ignored due to appearing too frequently or not frequently enough, they should not be added to the <code class="language-plaintext highlighter-rouge">idf</code> dicitionary.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">compute_idf</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">,</span> <span class="n">n_docs</span><span class="p">,</span> <span class="n">min_df</span><span class="o">=</span><span class="mi">15</span><span class="p">,</span> <span class="n">max_df_ratio</span><span class="o">=</span><span class="mf">0.90</span><span class="p">):</span>
+    <span class="s">""" Compute term IDF values from the inverted index.
+    Words that are too frequent or too infrequent get pruned.
+    
+    Hint: Make sure to use log base 2.
+    
+    Arguments
+    =========
+    
+    inv_idx: an inverted index as above
+    
+    n_docs: int,
+        The number of documents.
+        
+    min_df: int,
+        Minimum number of documents a term must occur in.
+        Less frequent words get ignored. 
+        Documents that appear min_df number of times should be included.
+    
+    max_df_ratio: float,
+        Maximum ratio of documents a term can occur in.
+        More frequent words get ignored.
+    
+    Returns
+    =======
+    
+    idf: dict
+        For each term, the dict contains the idf value.
+        
+    """</span>
+    
+    <span class="c1"># YOUR CODE HERE
+</span>    <span class="n">idf</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">word</span><span class="p">,</span> <span class="n">tuples</span> <span class="ow">in</span> <span class="n">inv_idx</span><span class="p">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">df_word</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">tuples</span><span class="p">)</span>
+        <span class="n">df_ratio</span> <span class="o">=</span> <span class="n">df_word</span> <span class="o">/</span> <span class="n">n_docs</span>
+        <span class="k">if</span> <span class="n">min_df</span> <span class="o">&gt;</span> <span class="n">df_word</span> <span class="ow">or</span>  <span class="n">max_df_ratio</span> <span class="o">&lt;</span> <span class="n">df_ratio</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="n">idf</span><span class="p">[</span><span class="n">word</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="p">.</span><span class="n">log2</span><span class="p">(</span><span class="n">n_docs</span> <span class="o">/</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">df_word</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">idf</span>
+        
+        
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># This is an autograder test. Here we can test the function you just wrote above.
+</span><span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span>
+<span class="n">idf_dict</span> <span class="o">=</span> <span class="n">compute_idf</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">))</span>
+<span class="n">execution_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">idf_dict</span><span class="p">)</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">)</span>
+<span class="k">assert</span> <span class="s">'blah'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">idf_dict</span>
+<span class="k">assert</span> <span class="s">'blah'</span> <span class="ow">in</span> <span class="n">inv_idx</span> 
+<span class="k">assert</span> <span class="s">'.'</span> <span class="ow">in</span> <span class="n">idf_dict</span>
+<span class="k">assert</span> <span class="s">'3'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">idf_dict</span>
+<span class="k">assert</span> <span class="n">idf_dict</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mf">6.0</span> <span class="ow">and</span> <span class="n">idf_dict</span><span class="p">[</span><span class="s">'bruce'</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="mf">7.0</span>
+<span class="k">assert</span> <span class="n">idf_dict</span><span class="p">[</span><span class="s">'baby'</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mf">6.0</span> <span class="ow">and</span> <span class="n">idf_dict</span><span class="p">[</span><span class="s">'baby'</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="mf">8.0</span>
+<span class="k">assert</span> <span class="n">execution_time</span> <span class="o">&lt;=</span> <span class="mf">1.0</span>
+</code></pre></div></div>
+
+<h2 id="q4-compute-the-norm-of-each-document-using-the-inverted-index-code-completion">Q4 Compute the norm of each document using the inverted index (Code Completion)</h2>
+
+<table>
+  <tbody>
+    <tr>
+      <td>Recalling our tf-idf vector representation of documents, we can compute the “norm” as the norm (length) of the vector representation of that document. More specifically, the norm of a document $j$, denoted as $\left</td>
+      <td>\left</td>
+      <td>d_j \right</td>
+      <td>\right</td>
+      <td>$, is given as follows…</td>
+    </tr>
+  </tbody>
+</table>
+
+\[\left|\left| d_j \right|\right| = \sqrt{\sum_{\text{word } i} (tf_{ij} \cdot idf_i)^2}\]
+
+<p>This will be important for the following question, where it is one of the required components for computing cosine similarity between a query and a document.</p>
+
+<p><strong>Note:</strong> Please use the above formula to compute the norm, and not any other formulae e.g. those from in-class quizzes.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">compute_doc_norms</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">idf</span><span class="p">,</span> <span class="n">n_docs</span><span class="p">):</span>
+    <span class="s">""" Precompute the euclidean norm of each document.
+    
+    Arguments
+    =========
+    
+    index: the inverted index as above
+    
+    idf: dict,
+        Precomputed idf values for the terms.
+    
+    n_docs: int,
+        The total number of documents.
+    
+    Returns
+    =======
+    
+    norms: np.array, size: n_docs
+        norms[i] = the norm of document i.
+    """</span>
+    
+    <span class="c1"># YOUR CODE HERE
+</span>    <span class="n">norms</span> <span class="o">=</span> <span class="n">np</span><span class="p">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_docs</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">word</span><span class="p">,</span> <span class="n">idf_score</span> <span class="ow">in</span> <span class="n">idf</span><span class="p">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">for</span> <span class="n">doc_id</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">index</span><span class="p">[</span><span class="n">word</span><span class="p">]:</span>
+            <span class="n">norms</span><span class="p">[</span><span class="n">doc_id</span><span class="p">]</span> <span class="o">+=</span> <span class="p">(</span><span class="n">count</span> <span class="o">*</span> <span class="n">idf_score</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span>
+    <span class="k">return</span> <span class="n">np</span><span class="p">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">norms</span><span class="p">)</span>
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># This is an autograder test. Here we can test the function you just wrote above.
+</span><span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span>
+<span class="n">doc_norms</span> <span class="o">=</span> <span class="n">compute_doc_norms</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">,</span> <span class="n">idf_dict</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">))</span>
+<span class="n">execution_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">)</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">doc_norms</span><span class="p">)</span>
+<span class="k">assert</span> <span class="n">doc_norms</span><span class="p">[</span><span class="mi">3722</span><span class="p">]</span> <span class="o">==</span> <span class="mi">0</span>
+<span class="k">assert</span> <span class="nb">max</span><span class="p">(</span><span class="n">doc_norms</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">80</span>
+<span class="k">assert</span> <span class="n">doc_norms</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mf">15.5</span> <span class="ow">and</span> <span class="n">doc_norms</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="mf">17.5</span>
+<span class="k">assert</span> <span class="n">doc_norms</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mf">6.5</span> <span class="ow">and</span> <span class="n">doc_norms</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="mf">8.5</span>
+<span class="k">assert</span> <span class="n">execution_time</span> <span class="o">&lt;=</span> <span class="mf">1.0</span>
+</code></pre></div></div>
+
+<h2 id="q5-find-the-most-similar-messages-to-the-quotes-code-completion">Q5 Find the most similar messages to the quotes (Code Completion)</h2>
+
+<p>The goal of this section is to implement <code class="language-plaintext highlighter-rouge">index_search</code>, a fast implementation of cosine similarity. You will then test your answer by running the search function using the code provided. Briefly discuss why it worked, or why it might not have worked, for each query.</p>
+
+<p>The goal of <code class="language-plaintext highlighter-rouge">index_search</code> is to compute the cosine similarity between the query and each document in the dataset. Naively, this computation requires you to compute dot products between the query tf-idf vector $q$ and each document’s tf-idf vector $d_i$.</p>
+
+<p>However, you should be able to use the sparsity of the tf-idf representation and the data structures you created to your advantage. More specifically, consider the cosine similarity…</p>
+
+\[cossim(\vec{q}, \vec{d_j}) = \frac{\vec{q} \cdot \vec{d_j}}{\|\vec{q}\| \cdot \|\vec{d_j}\|}\]
+
+<p>Specifically, focusing on the numerator…</p>
+
+\[\vec{q} \cdot \vec{d_j} = \sum_{i} {q_i} * {d_i}_j\]
+
+<p>Here ${q_i}$ and ${d_i}_j$ are the $i$-th dimension of the vectors $q$ and ${d_j}$ respectively.
+Because many ${q_i}$ and ${d_i}_j$ are zero, it is actually a bit wasteful to actually create the vectors $q$ and $d_j$ as numpy arrays; this is the method that you saw in class.</p>
+
+<p>A faster approach to computing the numerator term of cosine similarity involves quickly computing the above summation using the inverted index, pre-computed idf scores, and pre-computed document norms.</p>
+
+<p>A good “first step” to implementing this efficiently is to only loop over ${q}_j$ that are nonzero (i.e. ${q}_j$ such that the word $j$ appears in the query).</p>
+
+<p><strong>Note:</strong> Convert the query to lowercase, and use the <code class="language-plaintext highlighter-rouge">nltk.tokenize.TreebankWordTokenizer</code> to tokenize the query (provided to you as the <code class="language-plaintext highlighter-rouge">tokenizer</code> parameter). The transcripts have already been tokenized this way. <br /></p>
+
+<p><strong>Note:</strong> For <code class="language-plaintext highlighter-rouge">index_search</code>, you need not remove punctuation tokens from the tokenized query before searching.</p>
+
+<p><strong>Note:</strong> It is okay to see some duplicates in your printed results.</p>
+
+<p><strong>Aside:</strong> Precomputation</p>
+
+<p>In many settings, we will need to repeat the same kind of operation many times. Often, part of the input doesn’t change.
+Queries against the Kardashians transcript are like this: we want to run more queries (in the real world we’d want to run a lot of them every second, even) but the data we are searching doesn’t change.</p>
+
+<p>We could write an <code class="language-plaintext highlighter-rouge">index_search</code> function with the same signature as A3’s <code class="language-plaintext highlighter-rouge">verbatim_search</code>, taking the <code class="language-plaintext highlighter-rouge">query</code> and the <code class="language-plaintext highlighter-rouge">msgs</code> as input, and the function would look like:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>def index_search(query, msgs):
+    inv_idx = build_inverted_index(msgs)
+    idf = compute_idf(inv_idx, len(msgs))
+    doc_norms = compute_doc_norms(inv_idx)
+    # do actual search
+</code></pre></div></div>
+
+<p>But notice that the first three lines only depend on the messages. Imagine if we run this a million times with different queries but the same collection of documents: we’d wastefully recompute the index, the IDFs and the norms every time and discard them. It’s a better idea, then, to precompute them just once, and pass them as arguments.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">inv_idx</span> <span class="o">=</span> <span class="n">build_inverted_index</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">)</span>
+
+<span class="n">idf</span> <span class="o">=</span> <span class="n">compute_idf</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">),</span>
+                  <span class="n">min_df</span><span class="o">=</span><span class="mi">15</span><span class="p">,</span>
+                  <span class="n">max_df_ratio</span><span class="o">=</span><span class="mf">0.1</span><span class="p">)</span>  <span class="c1"># documents are very short so we can use a small value here
+</span>                                     <span class="c1"># examine the actual DF values of common words like "the"
+</span>                                     <span class="c1"># to set these values
+</span>
+<span class="n">inv_idx</span> <span class="o">=</span> <span class="p">{</span><span class="n">key</span><span class="p">:</span> <span class="n">val</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">val</span> <span class="ow">in</span> <span class="n">inv_idx</span><span class="p">.</span><span class="n">items</span><span class="p">()</span>
+           <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">idf</span><span class="p">}</span>            <span class="c1"># prune the terms left out by idf
+</span>
+<span class="n">doc_norms</span> <span class="o">=</span> <span class="n">compute_doc_norms</span><span class="p">(</span><span class="n">inv_idx</span><span class="p">,</span> <span class="n">idf</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">flat_msgs</span><span class="p">))</span>
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">index_search</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">index</span><span class="p">,</span> <span class="n">idf</span><span class="p">,</span> <span class="n">doc_norms</span><span class="p">,</span> <span class="n">tokenizer</span><span class="o">=</span><span class="n">treebank_tokenizer</span><span class="p">):</span>
+    <span class="s">""" Search the collection of documents for the given query
+    
+    Arguments
+    =========
+    
+    query: string,
+        The query we are looking for.
+    
+    index: an inverted index as above
+    
+    idf: idf values precomputed as above
+    
+    doc_norms: document norms as computed above
+    
+    tokenizer: a TreebankWordTokenizer
+    
+    Returns
+    =======
+    
+    results, list of tuples (score, doc_id)
+        Sorted list of results such that the first element has
+        the highest score (descending order), but if there is 
+        a tie for the score, sort by the second element, that is
+        the `doc_id` with ascending order. 
+        An example is as follows:
+        
+        score       doc_id
+       [(0.9,       1000),
+        (0.9,       1001),
+        (0.8,       2000),
+        (0.8,       2001),
+        (0.8,       2002),
+        ...]
+
+        
+    """</span>
+    
+    <span class="c1"># YOUR CODE HERE
+</span>    <span class="n">tok_q</span> <span class="o">=</span> <span class="n">tokenizer</span><span class="p">.</span><span class="n">tokenize</span><span class="p">(</span><span class="n">query</span><span class="p">.</span><span class="n">lower</span><span class="p">())</span>
+    
+    <span class="n">query_tf</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">tok_q</span><span class="p">:</span>
+        <span class="n">query_tf</span><span class="p">[</span><span class="n">word</span><span class="p">]</span> <span class="o">=</span> <span class="n">query_tf</span><span class="p">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">word</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
+    
+    <span class="n">index_dict</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">index</span><span class="p">:</span>
+        <span class="n">index_dict</span><span class="p">[</span><span class="n">word</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">doc_id</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">index</span><span class="p">[</span><span class="n">word</span><span class="p">]:</span>
+            <span class="n">index_dict</span><span class="p">[</span><span class="n">word</span><span class="p">][</span><span class="n">doc_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">count</span>
+        
+    <span class="n">result</span> <span class="o">=</span> <span class="p">[]</span>        
+    <span class="k">for</span> <span class="n">doc_id</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">doc_norms</span><span class="p">)):</span>
+        <span class="n">qnorm</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="n">dotprod</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">query_tf</span><span class="p">.</span><span class="n">keys</span><span class="p">():</span>
+            <span class="k">if</span> <span class="n">word</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">idf</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">query_tfidf</span> <span class="o">=</span> <span class="n">query_tf</span><span class="p">[</span><span class="n">word</span><span class="p">]</span> <span class="o">*</span> <span class="n">idf</span><span class="p">[</span><span class="n">word</span><span class="p">]</span>
+            <span class="n">doc_tfidf</span> <span class="o">=</span> <span class="n">index_dict</span><span class="p">[</span><span class="n">word</span><span class="p">].</span><span class="n">get</span><span class="p">(</span><span class="n">doc_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">*</span> <span class="n">idf</span><span class="p">[</span><span class="n">word</span><span class="p">]</span>
+            <span class="n">qnorm</span> <span class="o">+=</span> <span class="n">query_tfidf</span> <span class="o">**</span> <span class="mi">2</span>
+            <span class="n">dotprod</span> <span class="o">+=</span> <span class="n">query_tfidf</span> <span class="o">*</span> <span class="n">doc_tfidf</span>
+        <span class="n">qnorm</span> <span class="o">=</span> <span class="n">np</span><span class="p">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">qnorm</span><span class="p">)</span>
+        <span class="n">denom</span> <span class="o">=</span> <span class="n">doc_norms</span><span class="p">[</span><span class="n">doc_id</span><span class="p">]</span> <span class="o">*</span> <span class="n">qnorm</span>
+        <span class="n">score</span> <span class="o">=</span> <span class="p">(</span><span class="n">dotprod</span> <span class="o">/</span> <span class="n">denom</span><span class="p">)</span> <span class="k">if</span> <span class="n">denom</span> <span class="o">!=</span> <span class="mi">0</span> <span class="k">else</span> <span class="mi">0</span>
+        <span class="n">result</span><span class="p">.</span><span class="n">append</span><span class="p">((</span><span class="n">score</span><span class="p">,</span> <span class="n">doc_id</span><span class="p">))</span>
+    
+    <span class="n">result</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">key</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span> <span class="p">:(</span><span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">x</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span> <span class="n">reverse</span> <span class="o">=</span> <span class="bp">True</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">result</span><span class="p">[:</span><span class="mi">5</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">result</span>
+    
+</code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># This is an autograder test. Here we can test the function you just wrote above.
+</span><span class="s">"""
+Note that in the printing part, It is ok for there to be duplicates.
+"""</span>
+<span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">index_search</span><span class="p">(</span><span class="n">queries</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">inv_idx</span><span class="p">,</span> <span class="n">idf</span><span class="p">,</span> <span class="n">doc_norms</span><span class="p">)</span>
+<span class="n">execution_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+
+<span class="k">assert</span> <span class="nb">type</span><span class="p">(</span><span class="n">results</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">==</span> <span class="nb">tuple</span>
+<span class="k">assert</span> <span class="nb">max</span><span class="p">(</span><span class="n">results</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="n">results</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+<span class="k">assert</span> <span class="n">results</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mf">0.65</span> <span class="ow">and</span> <span class="n">results</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="mf">0.80</span>
+<span class="k">assert</span> <span class="n">execution_time</span> <span class="o">&lt;=</span> <span class="mf">1.0</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="nb">len</span><span class="p">(</span><span class="n">queries</span><span class="p">)):</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"#"</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">queries</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">queries</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"#"</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">queries</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span>
+
+    <span class="k">for</span> <span class="n">score</span><span class="p">,</span> <span class="n">msg_id</span> <span class="ow">in</span> <span class="n">index_search</span><span class="p">(</span><span class="n">queries</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">inv_idx</span><span class="p">,</span> <span class="n">idf</span><span class="p">,</span> <span class="n">doc_norms</span><span class="p">)[:</span><span class="mi">10</span><span class="p">]:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"[{:.2f}] {}: {}</span><span class="se">\n\t</span><span class="s">({})"</span><span class="p">.</span><span class="nb">format</span><span class="p">(</span>
+            <span class="n">score</span><span class="p">,</span>
+            <span class="n">flat_msgs</span><span class="p">[</span><span class="n">msg_id</span><span class="p">][</span><span class="s">'speaker'</span><span class="p">],</span>
+            <span class="n">flat_msgs</span><span class="p">[</span><span class="n">msg_id</span><span class="p">][</span><span class="s">'text'</span><span class="p">],</span>
+            <span class="n">flat_msgs</span><span class="p">[</span><span class="n">msg_id</span><span class="p">][</span><span class="s">'episode_title'</span><span class="p">]))</span> 
+    <span class="k">print</span><span class="p">()</span>
+</code></pre></div></div>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>[(0.7387080125279152, 33110), (0.7387080125279152, 24653), (0.7387080125279152, 13196), (0.7387080125279152, 9792), (0.7387080125279152, 4971)]
+##################
+What is Kim doing?
+##################
+[(0.7387080125279152, 33110), (0.7387080125279152, 24653), (0.7387080125279152, 13196), (0.7387080125279152, 9792), (0.7387080125279152, 4971)]
+[0.74] BRUCE: What you doing?
+	(The Wedding: Keeping Up With the Kardashians)
+[0.74] LAMAR: What you doing, mama?
+	(Keeping Up With the Kardashians - Blind Date)
+[0.74] KOURTNEY: Doing what?
+	(Keeping Up With the Kardashians - Kris the Cheerleader)
+[0.74] KHLOE: Doing what?
+	(Keeping Up With the Kardashians - Birthday Suit)
+[0.74] BRUCE: Doing what?
+	(Keeping Up With the Kardashians - Baby Blues)
+[0.68] KHLOE: What is this doing for you?
+	(Keeping Up With the Kardashians - Shape Up or Ship Out)
+[0.67] KOURTNEY: Kim is a hopeless romantic.
+	(Keeping Up With the Kardashians - Kris the Cheerleader)
+[0.63] KOURTNEY: What are you doing?
+	(Kourtney and Kim Take New York - Life in the Big City)
+[0.63] KOURTNEY: What are you doing?
+	(Kourtney and Kim Take New York - Diva Las Vegas)
+[0.63] SCOTT: What are you doing?
+	(Kourtney and Kim Take New York - Down and Out in New York City)
+
+####################################################################
+Even at my advanced age, I got the hot wife, I got 2 great families.
+####################################################################
+[(0.9568071434973142, 4259), (0.4876972035565681, 28559), (0.4710509075425327, 28993), (0.46134674413388577, 36308), (0.46134674413388577, 35654)]
+[0.96] BRUCE: Even at my age, I got the hot wife, I got a great family.
+	(Keeping Up With the Kardashians - Kardashian Family Vacation)
+[0.49] KIM: I got it at Madison.
+	(Keeping Up With the Kardashians - Double Trouble)
+[0.47] KRIS: You got my vote.
+	(Keeping Up With the Kardashians - Double Trouble)
+[0.46] BRUCE: You got it.
+	(Keeping Up With the Kardashians - I'm Watching You)
+[0.46] KRIS: You got it?
+	(Keeping Up With the Kardashians - Helping Hand)
+[0.46] ROB: I got it, I got it.
+	(Keeping Up With the Kardashians - Helping Hand)
+[0.46] WOMAN: Got it.
+	(The Wedding: Keeping Up With the Kardashians)
+[0.46] SHARON: Got it?
+	(The Wedding: Keeping Up With the Kardashians)
+[0.46] KRIS: I got it, I got it.
+	(Keeping Up With the Kardashians - Rob's New Girlfriend)
+[0.46] MALIKA: Got it, got it.
+	(Keeping Up With the Kardashians - Kourt Goes A.W.O.L.)
+
+###############
+I need a drink.
+###############
+[(1.0000000000000002, 9949), (1.0000000000000002, 4268), (0.7767752521378065, 14401), (0.7534932063864643, 9411), (0.7478153117950368, 1139)]
+[1.00] KHLOE: I need a drink.
+	(Keeping Up With the Kardashians - Birthday Suit)
+[1.00] KHLOE: I need a drink.
+	(Keeping Up With the Kardashians - Kardashian Family Vacation)
+[0.78] KRIS: Have a drink.
+	(Keeping Up With the Kardashians - Pussycat Vision)
+[0.75] KRIS: I want to drink a toast to Nilda and Joe.
+	(Keeping Up With the Kardashians - Leaving the Nest)
+[0.75] KRIS: No wonder I drink.
+	(Keeping Up With the Kardashians - Shape Up or Ship Out)
+[0.75] KRIS: No wonder I drink.
+	(Keeping Up With the Kardashians - Shape Up or Ship Out)
+[0.70] ADRIENNE: Get me a drink.
+	(The Wedding: Keeping Up With the Kardashians)
+[0.70] ADRIENNE: Get me a drink.
+	(Keeping Up With the Kardashians - The Wedding)
+[0.65] SCOTT: I don't really have a drink.
+	(Kourtney and Kim Take New York - Down and Out in New York City)
+[0.65] SCOTT: I don't really have a drink.
+	(Kourtney and Kim Take New York - Start Spreading the News)
+</code></pre></div></div>
+
+<h2 id="q5b-find-the-most-similar-messages-to-the-quotes-free-response">Q5b Find the most similar messages to the quotes (Free Response)</h2>
+
+<p>Briefly discuss why cosine similarity worked, or why it might not have worked, <strong>for each query</strong>.</p>
+
+<div style="border-bottom: 4px solid #AAA; padding-bottom: 6px; font-size: 16px; font-weight: bold;">Write your answer in the provided cell below</div>
+
+<ol>
+  <li>It’s not working. From the fact that the first five results have the same score, we can infer that “Kim” and “is” may be removed by our cutoff scheme, so only matching two words cannot find exactly what we want. Also, the word order doesn’t matter in calculating our score also leads to the results we get.</li>
+  <li>It’s working. From the fact that the difference between the firs two results is high, we see that our algorithm distinguished what is close and what is not. There are less common words in the query, and the query is long enough for data to be more accurate. From this we can genralize that the length of the query and the uniqueness of the word affect our score a lot.</li>
+  <li>It’s working. We are able to fetch the exact same sentence, and as we can see the score is 1.00, cos(0) = 1, there’s not difference between what is found and the query. For the less relevant documents, even though the score is not perfect, the score is high. This is because “drink” is not very common and the documents that contain the word are all somewhat relevant.</li>
+</ol>
+
+<div style="border-top: 4px solid #AAA; padding-bottom: 6px; font-size: 16px; font-weight: bold; text-align: center;"></div>
+
+<h2 id="q6ec-extra-credit-question-1-optional">Q6EC: Extra credit question 1 (optional)</h2>
+
+<h3 id="updating-precomputed-values">Updating precomputed values.</h3>
+
+<p>In many real-world applications, the collection of documents will not stay the same forever. At Internet-scale, however, it could possibly even be worth recomputing things every second, if during that second we’re going to answer millions of queries.</p>
+
+<p>However, there’s a better way: in reality, the document set will not change radically, but incrementally.  In particular, it’s most common to add or remove a bunch of new documents to the index.</p>
+
+<p>Write functions <code class="language-plaintext highlighter-rouge">add_docs</code> and <code class="language-plaintext highlighter-rouge">remove_docs</code> that update the index, idf and document norms.  Think of the implications this has on how we store the IDF. Is there a better way of storing it, that minimizes the memory we need to touch when updating?</p>
+
+<p>Think of adequate test cases for these functions and implement them.</p>
+
+<p><strong>Note:</strong> You can get up to 0.5 EC for completing this question. <em>Do not delete the cell below.</em> Please comment out the <code class="language-plaintext highlighter-rouge">raise NotImplementedError()</code> if you choose not to answer this question.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># YOUR CODE HERE
+</span>    
+<span class="c1"># raise NotImplementedError()
+</span></code></pre></div></div>
+
+<h2 id="q7ec-extra-credit-question-2-optional">Q7EC: Extra credit question 2 (optional)</h2>
+
+<h3 id="finding-your-own-similarity-metric">Finding your own similarity metric</h3>
+
+<p>We’ve explored using cosine similarity and edit distance to find similar messages to input queries. However, there’s a whole world of ways to measure the similarity between two documents. Go forth, and research!</p>
+
+<p>(Fun fact: Fundamental information retrieval techniques were in fact developed at Cornell, so you would not be the first Cornellian to disrupt the field)</p>
+
+<p>For this question, find a new way of measuring similarity between two documents, and implement a search using your new metric. Your new way of measuring document similarity should be different enough from the two approaches we already implemented. It can be a method you devise or an existing method from somewhere else (make sure to reveal your sources).</p>
+
+<p><strong>Note:</strong> The amount of EC awarded for this question will be determined based on creativity, originality, implementation, and analysis. <em>Do not delete the cell below.</em> Please comment out the <code class="language-plaintext highlighter-rouge">raise NotImplementedError()</code> if you choose not to answer this question.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># YOUR CODE HERE
+# raise NotImplementedError()
+</span></code></pre></div></div>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+</code></pre></div></div>
+:ET
